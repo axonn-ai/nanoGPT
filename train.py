@@ -26,6 +26,8 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from axonn import axonn as ax
+from axonn.intra_layer import clip_grad_norm_
 
 from model import GPTConfig, GPT
 
@@ -72,6 +74,11 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+
+# model parallelism args
+G_intra_r=1
+G_intra_c=1
+
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -79,15 +86,50 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+def set_device_and_init_torch_dist():
+    from mpi4py import MPI
+    world_rank = MPI.COMM_WORLD.Get_rank()
+    world_size = MPI.COMM_WORLD.Get_size()
+
+    # assign a unique GPU to each MPI process on a node    
+    local_rank = world_rank % torch.cuda.device_count()
+    torch.cuda.set_device(local_rank)
+
+    init_method = "tcp://"
+    master_ip = os.getenv("MASTER_ADDR", "localhost")
+    master_port = os.getenv("MASTER_PORT", "6000")
+    init_method += master_ip + ":" + master_port
+   
+    # create a process group across all processes 
+    torch.distributed.init_process_group(
+                init_method=init_method,
+                backend="nccl",
+                world_size=world_size,
+                rank=world_rank
+    )
+    return local_rank
+
+local_rank = set_device_and_init_torch_dist()
+world_size = torch.distributed.get_world_size()
+world_rank = torch.distributed.get_rank()
+assert world_size % (G_intra_r * G_intra_c) == 0
+G_data = world_size // (G_intra_r * G_intra_c)
+ax.init( 
+        G_data=G_data,
+        G_inter=1,
+        G_intra_r=G_intra_r,
+        G_intra_c=G_intra_c
+    )
+
+print(f"G_data={G_data} x G_intra_r={G_intra_r} x G_intra_c={G_intra_c}")
+
+ddp = G_data > 1
 if ddp:
-    init_process_group(backend=backend)
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(device)
-    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+    #init_process_group(backend=backend)
+    ddp_rank = ax.config.data_parallel_rank #int(os.environ['RANK'])
+    ddp_world_size = G_data
+    device = f'cuda:{local_rank}'
+    master_process = (ddp_rank == 0) # this process will do logging, checkpointing etc.
     seed_offset = ddp_rank # each process gets a different seed
     # world_size number of processes will be training simultaneously, so we can scale
     # down the desired gradient accumulation iterations per process proportionally
@@ -199,6 +241,8 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
+
+
 checkpoint = None # free up memory
 
 # compile the model
@@ -209,7 +253,7 @@ if compile:
 
 # wrap model into DDP container
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+    model = DDP(model, device_ids=[local_rank], process_group=ax.comm_handle.coll_nccl_comm)
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -252,6 +296,8 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+
+
 while True:
 
     # determine and set the learning rate for this iteration
@@ -262,7 +308,8 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if torch.distributed.get_rank() == 0:
+            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -283,7 +330,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                #torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -306,7 +353,7 @@ while True:
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
@@ -324,7 +371,8 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        if torch.distributed.get_rank() == 0:
+            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
     local_iter_num += 1
 
