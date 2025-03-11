@@ -31,6 +31,8 @@ from axonn.intra_layer import clip_grad_norm_, sync_gradients, auto_parallelize
 from axonn.intra_layer import optimize_communication
 
 from model import GPTConfig, GPT
+from mpi4py import MPI
+MPI.Init()
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -80,9 +82,20 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 G_intra_r=1
 G_intra_c=1
 G_intra_d=1
+use_uni_dist=False
+uni_dist_low_latency_all_gathers=False
+uni_dist_low_latency_reduce_scatters=False
+overlap_comm=True
+flops_promised=312e12
+
 
 # gradient checkpointing
 gradient_checkpointing=False
+
+world_size = MPI.COMM_WORLD.Get_size()
+world_rank = MPI.COMM_WORLD.Get_rank()
+torch.distributed.init_process_group(backend="nccl", rank=world_rank, world_size=world_size)
+
 
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -90,9 +103,11 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
-torch.distributed.init_process_group(backend="nccl")
-world_size = torch.distributed.get_world_size()
-world_rank = torch.distributed.get_rank()
+def print_rank0(msg):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
+
+
 assert world_size % (G_intra_r * G_intra_c * G_intra_d) == 0
 G_data = world_size // (G_intra_r * G_intra_c * G_intra_d)
 ax.init( 
@@ -100,9 +115,13 @@ ax.init(
         G_intra_r=G_intra_r,
         G_intra_c=G_intra_c,
         G_intra_d=G_intra_d,
+        use_uni_dist=use_uni_dist,
+        gpus_per_node=torch.cuda.device_count(),
+        low_latency_all_gathers=uni_dist_low_latency_all_gathers,
+        low_latency_reduce_scatters=uni_dist_low_latency_reduce_scatters
     )
 
-print(f"G_data={G_data} x G_intra_r={G_intra_r} x G_intra_c={G_intra_c} x G_intra_d={G_intra_d}")
+print_rank0(f"G_data={G_data} x G_intra_r={G_intra_r} x G_intra_c={G_intra_c} x G_intra_d={G_intra_d}")
 multi_gpu = world_size > 1
 
 if multi_gpu:
@@ -120,7 +139,7 @@ else:
     seed_offset = 0
     world_size = 1
 tokens_per_iter = gradient_accumulation_steps * world_size * batch_size * block_size
-print(f"tokens per iteration will be: {tokens_per_iter:,}")
+print_rank0(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
@@ -146,7 +165,8 @@ def get_batch(split):
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        #x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        x, y = x.to(device), y.to(device)
     else:
         x, y = x.to(device), y.to(device)
     return x, y
@@ -162,19 +182,20 @@ if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+    print_rank0(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout, gradient_checkpointing=gradient_checkpointing) # start with model_args from command line
+                  bias=bias, vocab_size=None, dropout=dropout, gradient_checkpointing=gradient_checkpointing,
+                  ) # start with model_args from command line
 
 with auto_parallelize():
     if init_from == 'scratch':
         # init a new model from scratch
-        print("Initializing a new model from scratch")
+        print_rank0("Initializing a new model from scratch")
         # determine the vocab size we'll use for from-scratch training
         if meta_vocab_size is None:
-            print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+            print_rank0("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
         model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
         gptconf = GPTConfig(**model_args)
         model = GPT(gptconf)
@@ -216,7 +237,7 @@ if block_size < model.config.block_size:
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -228,7 +249,7 @@ checkpoint = None # free up memory
 
 # compile the model
 if compile:
-    print("compiling the model... (takes a ~minute)")
+    print_rank0("compiling the model... (takes a ~minute)")
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
@@ -286,52 +307,53 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0:
-        losses = estimate_loss()
-        if torch.distributed.get_rank() == 0:
-            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
-            })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                #torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-    if iter_num == 0 and eval_only:
-        break
+    # # evaluate the loss on train/val sets and write checkpoints
+    # if iter_num % eval_interval == 0:
+    #     losses = estimate_loss()
+    #     if torch.distributed.get_rank() == 0:
+    #         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    #         if wandb_log:
+    #             wandb.log({
+    #                 "iter": iter_num,
+    #                 "train/loss": losses['train'],
+    #                 "val/loss": losses['val'],
+    #                 "lr": lr,
+    #                 "mfu": running_mfu*100, # convert to percentage
+    #             })
+    #     if losses['val'] < best_val_loss or always_save_checkpoint:
+    #         best_val_loss = losses['val']
+    #         if iter_num > 0:
+    #             checkpoint = {
+    #                 'model': raw_model.state_dict(),
+    #                 'optimizer': optimizer.state_dict(),
+    #                 'model_args': model_args,
+    #                 'iter_num': iter_num,
+    #                 'best_val_loss': best_val_loss,
+    #                 'config': config,
+    #             }
+    #             print(f"saving checkpoint to {out_dir}")
+    #             #torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+    # if iter_num == 0 and eval_only:
+    #     break
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
         require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-        with ctx, optimize_communication(True, True, True, model):
+        overlap_comm = overlap_comm and (not use_uni_dist)
+        with ctx, optimize_communication(overlap_comm, overlap_comm, overlap_comm, model):
             _, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
         if multi_gpu and require_backward_grad_sync:
             sync_gradients(model, mean=True)
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        clip_grad_norm_(model.parameters(), grad_clip)
+        grad_norm = clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
@@ -347,12 +369,14 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt, flops_promised=flops_promised)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         memory = torch.cuda.memory_allocated() / 1024 / 1024 / 1024
         peak = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
         if torch.distributed.get_rank() == 0:
-            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, mem = {memory:.2f} GB | max mem = {peak} GB")
+            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, mem = {memory:.2f} GB, max mem = {peak:.2f} GB")
+            if grad_clip != 0.0:
+                print(f"grad-norm = {grad_norm:.2f}")
     iter_num += 1
     local_iter_num += 1
 

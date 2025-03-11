@@ -16,15 +16,20 @@ comes up with a better simple Python solution I am all ears.
 
 import sys
 from ast import literal_eval
+import torch
+
+def print_rank0(msg):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
 
 for arg in sys.argv[1:]:
     if '=' not in arg:
         # assume it's the name of a config file
         assert not arg.startswith('--')
         config_file = arg
-        print(f"Overriding config with {config_file}:")
+        print_rank0(f"Overriding config with {config_file}:")
         with open(config_file) as f:
-            print(f.read())
+            print_rank0(f.read())
         exec(open(config_file).read())
     else:
         # assume it's a --key=value argument
@@ -41,7 +46,7 @@ for arg in sys.argv[1:]:
             # ensure the types match ok
             assert type(attempt) == type(globals()[key])
             # cross fingers
-            print(f"Overriding: {key} = {attempt}")
+            print_rank0(f"Overriding: {key} = {attempt}")
             globals()[key] = attempt
         else:
             raise ValueError(f"Unknown config key: {key}")
