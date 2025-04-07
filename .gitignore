@@ -10,3 +10,9 @@ __pycache__/
 input.txt
 env/
 venv/
+comm-venv/
+*.out
+*.csv
+*.sh
+data/litgpt
+wandb/ 

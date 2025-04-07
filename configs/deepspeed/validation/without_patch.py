@@ -5,13 +5,13 @@ wandb_log = False
 compile = False
 
 # Batch size settings
-batch_size = 1
+batch_size = 2
 block_size = 2048
-gradient_accumulation_steps = 16
+gradient_accumulation_steps = 64
 
 # Training settings
-max_iters = 100
-lr_decay_iters = 100
+max_iters = 1000
+lr_decay_iters = 1000
 
 # Evaluation settings
 eval_interval = 1000

@@ -16,7 +16,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn import init as init
 from torch.utils.checkpoint import checkpoint
-from axonn import axonn as ax
+import torch.distributed as dist
+#from axonn import axonn as ax
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -37,10 +38,10 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 
-                3 * config.n_embd)
+                3 * config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, 
-                config.n_embd)
+                config.n_embd, bias=config.bias)
 
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -87,11 +88,11 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 
-                4 * config.n_embd) 
+                4 * config.n_embd, bias=config.bias) 
                 
         self.gelu    = nn.GELU()
         self.c_proj  = nn.Linear(4 * config.n_embd, 
-                config.n_embd)
+                config.n_embd, bias=config.bias)
 
         self.dropout = nn.Dropout(config.dropout)
 
@@ -142,7 +143,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -157,25 +158,31 @@ class GPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
-        if torch.distributed.get_rank() == 0:
-            print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        # if torch.distributed.get_rank() == 0:
+        #     print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self, non_embedding=True , deepspeed=True):
         """
         Return the number of parameters in the model.
         For non-embedding count (default), the position embeddings get subtracted.
         The token embeddings would too, except due to the parameter sharing these
         params are actually used as weights in the final layer, so we include them.
         """
-        tp_param_count = 0
-        non_tp_param_count = 0
-        for p in self.parameters():
-            if getattr(p, "is_tensor_parallel", False):
-                tp_param_count += p.numel()
-        n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()        
-        return n_params + tp_param_count * (ax.config.G_intra-1)
+        # tp_param_count = 0
+        # non_tp_param_count = 0
+        # for p in self.parameters():
+        #     if getattr(p, "is_tensor_parallel", False):
+        #         tp_param_count += p.numel()
+        # n_params = sum(p.numel() for p in self.parameters())
+        # if non_embedding:
+        #     n_params -= self.transformer.wpe.weight.numel()        
+        # return n_params + tp_param_count * (ax.config.G_intra-1)
+        if deepspeed:
+            n_params = sum(p.ds_numel for p in self.parameters())
+            if non_embedding:
+                n_params -= self.transformer.wpe.weight.ds_numel
+        return n_params
+
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -309,7 +316,7 @@ class GPT(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt, flops_promised=312):
+    def estimate_mfu(self, fwdbwd_per_iter, dt, flops_promised=312e12):
         """ estimate model flops utilization (MFU) """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
