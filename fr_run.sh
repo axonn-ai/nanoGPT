@@ -5,13 +5,19 @@
 #SBATCH -C nvme
 
 PROJ_NAME="csc547"
-export WRKSPC="/lustre/orion/$PROJ_NAME/scratch/$USER/communication"
+export WRKSPC="/lustre/orion/$PROJ_NAME/scratch/$USER/nanoGPT"
 export ENV_NAME="comm-venv"
 
 module load cray-mpich/8.1.31
 module load amd-mixed/6.2.4
 module load cpe/24.11
 module load craype-accel-amd-gfx90a
+module load cray-python/3.10.10
+module load rocm
+module load ninja
+export CXX=CC 
+export CC=cc
+
 #module load cray-python/3.10.10
 
 ## calculating the number of nodes and GPUs
@@ -31,7 +37,8 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_NET_GDR_LEVEL="PHB"
 ## RCCL plugin
 export userid=$(whoami)
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/mnt/bb/${userid}/aws-ofi-rccl/lib/"
+#export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/mnt/bb/${userid}/aws-ofi-rccl/lib/"
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$WRKSPC/aws-ofi-rccl/lib/"
 
 # mpich gpu support
 export MPICH_GPU_SUPPORT_ENABLED=1
@@ -63,26 +70,50 @@ export WANDB_MODE="offline"
 export PYTHONPATH="$PYTHONPATH:."
 
 
-start_time=$(date +%s)
-# echo "broadcasting data to burst buffer"
-# sbcast -pf data/openwebtext/train.bin /mnt/bb/ssingh37/train.bin
-echo "broadcasting environment"
-sbcast $WRKSPC/$ENV_NAME.tar.gz /mnt/bb/$userid/$ENV_NAME.tar.gz
-echo "brodcasting aws ofi"
-sbcast $WRKSPC/aws-ofi-rccl.tar.gz /mnt/bb/$userid/aws-ofi-rccl.tar.gz
-end_time=$(date +%s)
+# start_time=$(date +%s)
+echo "broadcasting data to burst buffer"
+sbcast -pf data/openwebtext/train.bin /mnt/bb/ssingh37/train.bin
+# # echo "broadcasting environment"
+# # sbcast $WRKSPC/$ENV_NAME.tar.gz /mnt/bb/$userid/$ENV_NAME.tar.gz
+# echo "brodcasting aws ofi"
+# sbcast $WRKSPC/aws-ofi-rccl.tar.gz /mnt/bb/$userid/aws-ofi-rccl.tar.gz
+# end_time=$(date +%s)
 
-echo "Time taken: $((end_time - start_time)) seconds"
+#echo "Time taken: $((end_time - start_time)) seconds"
 
-if [ ! -L  $WRKSPC/$ENV_NAME -a ! -d $WRKSPC/$ENV_NAME ]; then
-	rm $WRKSPC/$ENV_NAME
-	mkdir /mnt/bb/$userid/$ENV_NAME
-	ln -s /mnt/bb/$userid/$ENV_NAME $WRKSPC/$ENV_NAME
-	rm -rf /mnt/bb/$userid/$ENV_NAME
+# if [ ! -L  $WRKSPC/$ENV_NAME -a ! -d $WRKSPC/$ENV_NAME ]; then
+# 	rm $WRKSPC/$ENV_NAME
+# 	mkdir /mnt/bb/$userid/$ENV_NAME
+# 	ln -s /mnt/bb/$userid/$ENV_NAME $WRKSPC/$ENV_NAME
+# 	rm -rf /mnt/bb/$userid/$ENV_NAME
+# fi
+GLOBAL_BATCH_SIZE=8192
+GAS=${2:-1}
+GLOBAL_GAS=$(( GAS * WORLD_SIZE ))
+MICRO_BS=$(( GLOBAL_BATCH_SIZE / GLOBAL_GAS ))
+
+
+COMMON_ARGS="--wandb_log=False \
+            --compile=False \
+            --max_iters=10 \
+            --lr_decay_iters=10 \
+            --log_interval=1 \
+            --gradient_checkpointing=True \
+            --gradient_accumulation_steps='${GLOBAL_GAS}' \
+            --batch_size='${MICRO_BS}' \
+            --block_size=2048
+"
+
+
+if [[ -n "$USE_PCCL" ]]; then
+    COMMON_ARGS+=" --use_pccl=True"
 fi
 
-export SCRIPT="python -u train.py $1"
-run_cmd="srun -N $NNODES -n $GPUS --ntasks-per-node=8 -c 7 ${CPU_MASK} --mem-bind=map_mem:3,3,1,1,0,0,2,2  ./runner.sh" 
+echo $COMMON_ARGS
+
+export SCRIPT="python -u train_deepspeed.py $1 $COMMON_ARGS"
+source ./comm-venv/bin/activate
+run_cmd="srun -N $NNODES -n $GPUS --ntasks-per-node=8 -c 7 ${CPU_MASK} --mem-bind=map_mem:3,3,1,1,0,0,2,2  $SCRIPT" 
 echo $run_cmd 
 eval $run_cmd 
 

@@ -1,12 +1,10 @@
 #!/bin/bash
-GPUS=$1
-
-for config_file in configs/13B/*/gpus_$GPUS.py; do
-    # Extract GPU count from filename (e.g., gpus_128.py -> 128)
-    GPUS=$(echo "$config_file" | grep -oP '(?<=gpus_)\d+')
-    NODES=$(( (GPUS + 7) / 8 ))  # Calculate nodes (ceiling division)
-    
-    cmd="sbatch --nodes=$NODES fr_run.sh $config_file"
+MODEL="13B"
+for nodes in 128 256 512 1024; do
+    cmd="USE_PCCL=1 sbatch --nodes=$nodes -o ds_${MODEL}_yaccl_$nodes.out fr_run.sh ./configs/deepspeed/${MODEL}.py"
+    echo $cmd
+    eval $cmd
+    cmd="sbatch --nodes=$nodes -o ds_${MODEL}_$nodes.out fr_run.sh ./configs/deepspeed/${MODEL}.py"
     echo $cmd
     eval $cmd
 done
