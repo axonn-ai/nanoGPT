@@ -139,7 +139,7 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # poor man's data loader
-data_dir = "data/openwebtext"#"/mnt/bb/ssingh37/"
+data_dir = "data/openwebtext" 
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
@@ -353,7 +353,7 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt, flops_promised=flops_promised)
+            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt, flops_promised=flops_promised, deepspeed=True)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         memory = torch.cuda.memory_allocated() / 1024 / 1024 / 1024
         peak = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024

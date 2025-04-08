@@ -8,5 +8,10 @@
         "n_layer": 40,
         "n_head": 40,
         "n_embd": 5120
+    },
+    "175B":{
+        "n_layer": 96,
+        "n_head": 96,
+        "n_embd": 12288
     }
 }

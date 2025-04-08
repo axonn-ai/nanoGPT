@@ -17,7 +17,7 @@ from torch.nn import functional as F
 from torch.nn import init as init
 from torch.utils.checkpoint import checkpoint
 import torch.distributed as dist
-#from axonn import axonn as ax
+from axonn import axonn as ax
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -168,19 +168,21 @@ class GPT(nn.Module):
         The token embeddings would too, except due to the parameter sharing these
         params are actually used as weights in the final layer, so we include them.
         """
-        # tp_param_count = 0
-        # non_tp_param_count = 0
-        # for p in self.parameters():
-        #     if getattr(p, "is_tensor_parallel", False):
-        #         tp_param_count += p.numel()
-        # n_params = sum(p.numel() for p in self.parameters())
-        # if non_embedding:
-        #     n_params -= self.transformer.wpe.weight.numel()        
-        # return n_params + tp_param_count * (ax.config.G_intra-1)
+        
         if deepspeed:
             n_params = sum(p.ds_numel for p in self.parameters())
             if non_embedding:
                 n_params -= self.transformer.wpe.weight.ds_numel
+        else:
+            tp_param_count = 0
+            non_tp_param_count = 0
+            for p in self.parameters():
+                if getattr(p, "is_tensor_parallel", False):
+                    tp_param_count += p.numel()
+            n_params = sum(p.numel() for p in self.parameters())
+            if non_embedding:
+                n_params -= self.transformer.wpe.weight.numel()        
+            n_params += tp_param_count * (ax.config.G_intra-1)
         return n_params
 
 
@@ -316,11 +318,11 @@ class GPT(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt, flops_promised=312e12):
+    def estimate_mfu(self, fwdbwd_per_iter, dt, flops_promised=312e12, deepspeed=False):
         """ estimate model flops utilization (MFU) """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.get_num_params() 
+        N = self.get_num_params(deepspeed=deepspeed) 
         cfg = self.config
         L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
         flops_per_token = 6*N + 12*L*H*Q*T

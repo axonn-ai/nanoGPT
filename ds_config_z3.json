@@ -1,5 +1,5 @@
 {
-    "train_batch_size": 2048,
+    "train_batch_size": 8192,
     "steps_per_print": 100000,
     "optimizer": {
       "type": "Adam",
@@ -31,8 +31,8 @@
         "stage": 3,
         "allgather_partitions": true,
         "reduce_scatter": true,
-        "allgather_bucket_size": 5e8,
-        "reduce_bucket_size": 5e8,
+        "allgather_bucket_size": 1e9,
+        "reduce_bucket_size": 1e9,
         "overlap_comm": false,
         "contiguous_gradients": true,
         "cpu_offload": false

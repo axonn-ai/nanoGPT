@@ -13,6 +13,8 @@ venv/
 comm-venv/
 *.out
 *.csv
-*.sh
 data/litgpt
 wandb/ 
+uni_dist/
+axonn/
+aws-ofi-rccl*
