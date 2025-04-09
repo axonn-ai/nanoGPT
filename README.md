@@ -1,6 +1,41 @@
 
 # nanoGPT
 
+
+## Running deepspeed+nanogpt+pccl on Perlmutter
+
+Cloning this repo - 
+
+```bash
+cd $SCRATCH
+git clone https://github.com/axonn-ai/nanoGPT
+git checkout new-collectives
+```
+
+
+Create the environment with deepspeed and pccl. You should see a folder called `uni_dist` in nanoGPT if this script works 
+correctly.
+```bash
+bash create_python_env_perlmutter.sh
+```
+
+Preparing the data - The data is already in $CFS. You need to bring it into your repo.
+
+```bash
+cp $CFS/parallel_deep_learning/openwebtext/*.bin ./data/openwebtext/
+```
+
+Grab a 4 node interactive session. Let's run the 7B model with NCCL.
+```bash
+bash pm_run.sh ./configs/deepspeed/7B.py
+```
+
+Now to use PCCL - 
+```bash
+USE_PCCL=1 bash pm_run.sh ./configs/deepspeed/7B.py
+```
+
+
 ![nanoGPT](assets/nanogpt.jpg)
 
 The simplest, fastest repository for training/finetuning medium-sized GPTs. It is a rewrite of [minGPT](https://github.com/karpathy/minGPT) that prioritizes teeth over education. Still under active development, but currently the file `train.py` reproduces GPT-2 (124M) on OpenWebText, running on a single 8XA100 40GB node in about 4 days of training. The code itself is plain and readable: `train.py` is a ~300-line boilerplate training loop and `model.py` a ~300-line GPT model definition, which can optionally load the GPT-2 weights from OpenAI. That's it.
