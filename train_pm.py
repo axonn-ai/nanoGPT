@@ -15,6 +15,10 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
+from mpi4py import MPI 
+comm = MPI.COMM_WORLD 
+rank = comm.Get_rank()
+print(f"Hello from process {rank}")
 
 import os
 import time
