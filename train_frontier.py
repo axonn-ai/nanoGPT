@@ -15,8 +15,13 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
-
 import os
+if os.environ.get("WITH_PERFORMANCE_COUNTERS") == "1":
+    from mpi4py import MPI 
+    comm = MPI.COMM_WORLD 
+    rank = comm.Get_rank()
+    print(f"Hello from process {rank}")
+
 import time
 import types
 import math
@@ -35,7 +40,6 @@ from model import GPTConfig, GPT
 
 from torch.profiler import _KinetoProfile
 _KinetoProfile._get_distributed_info = lambda self: None
-from unittest.mock import MagicMock, patch
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -154,14 +158,6 @@ def get_batch(split):
     else:
         x, y = x.to(device), y.to(device)
     return x, y
-
-def patched_export_chrome_trace(self, path):
-    kineto_results = getattr(self, 'kineto_results', None)
-    if not kineto_results:
-        with patch("torch.autograd.profiler.kineto_available", return_value=False):
-            return self.export_chrome_trace(path)
-    else:
-        return self.export_chrome_trace(path)
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -400,9 +396,7 @@ if os.environ.get("WITH_PROFILER") == "1":
     rank = torch.distributed.get_rank()
     trace_file = os.path.join(profiler_output_dir, f"{slurm_job_name}-{slurm_job_id}-{rank}-profiler.json")
     
-    # patched export_chrome_trace to skip the kineto_results.save()
-    prof.patched_export_chrome_trace = types.MethodType(patched_export_chrome_trace, prof)
-    prof.patched_export_chrome_trace(trace_file)
+    prof.export_chrome_trace(trace_file)
 
 if multi_gpu:
     destroy_process_group()
