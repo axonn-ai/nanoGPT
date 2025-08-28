@@ -27,6 +27,7 @@ def pccl_all_reduce_hook(group: dist.ProcessGroup, bucket: dist.GradBucket) -> t
         output_tensor = torch.empty(input_tensor.size(0), 
                                     device=input_tensor.device, 
                                     dtype=input_tensor.dtype)
+        # pccl is blocking for now
         all_reduce_2D(output_tensor, 
                     input_tensor, 
                     group=get_heir_pg(), 
@@ -34,7 +35,7 @@ def pccl_all_reduce_hook(group: dist.ProcessGroup, bucket: dist.GradBucket) -> t
                     use_rh_and_rd=True,
                     use_pccl_cpp_backend=True)
         
-        # Create a future and set the result
+        # Create _dummy_ future and set the result
         future = torch.futures.Future()
         future.set_result(output_tensor)
         return future
