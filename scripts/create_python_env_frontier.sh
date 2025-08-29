@@ -17,12 +17,14 @@ echo -e "${RED}Creating Python Environment in $WRKSPC:${GREEN}"
 # Load modules
 module reset
 # load modules
-rocm_version=6.2.4
-module load PrgEnv-gnu/8.6.0
-module load rocm/${ROCM_VERSION}
+rocm_version=6.4.1
+module load PrgEnv-cray
+module load rocm/${rocm_version}
+module load cray-mpich/8.1.32
+module load cpe/25.03
 module load craype-accel-amd-gfx90a
 module load cray-python/3.11.7
-module load cray-mpich/8.1.32
+module load ninja
 module list
 
 #Step 1 - activate your venv
@@ -33,7 +35,7 @@ pip install -U pip
 
 echo -e "${RED}Installing Dependencies:${GREEN}"
 #Step 2 - install torch
-pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/rocm6.2.4
+pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4
 pip install --upgrade numpy
 
 #Step 3 build mpi4py
@@ -49,13 +51,13 @@ pip install numpy transformers datasets tiktoken wandb tqdm
 # cd ${SCRATCH}
 # git clone --recursive https://github.com/ROCmSoftwarePlatform/aws-ofi-rccl 
 # cd aws-ofi-rccl
-# libfabric_path=/opt/cray/libfabric/1.15.2.0
+# libfabric_path=/opt/cray/libfabric/1.22.0
 # ./autogen.sh
 # export LD_LIBRARY_PATH=/opt/rocm-$rocm_version/lib:$LD_LIBRARY_PATH
 # PLUG_PREFIX=$PWD
 # CC=hipcc CFLAGS=-I/opt/rocm-$rocm_version/include ./configure \
 # 	--with-libfabric=$libfabric_path --with-rccl=/opt/rocm-$rocm_version --enable-trace \
-# 	--prefix=$PLUG_PREFIX --with-hip=/opt/rocm-$rocm_version/hip --with-mpi=$MPICH_DIR
+# 	--prefix=$PLUG_PREFIX --with-hip=/opt/rocm-$rocm_version --with-mpi=$MPICH_DIR
 # make
 # make install
 # cd ..

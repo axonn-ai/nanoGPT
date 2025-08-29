@@ -16,17 +16,13 @@ export TRITON_CACHE_DIR="${SCRATCH}/.cache/triton"
 cd $WRKSPC
 
 # load modules
-ROCM_VERSION=6.2.4
-echo resetting modules:
-module reset
-echo loading modules:
-module load PrgEnv-gnu/8.6.0
-module load rocm/${ROCM_VERSION}
+rocm_version="6.4.1"
+module load PrgEnv-cray
+module load rocm/${rocm_version}
+module load cray-mpich/8.1.32
+module load cpe/25.03
 module load craype-accel-amd-gfx90a
 module load cray-python/3.11.7
-module load cray-mpich/8.1.31
-module load cpe/24.11
-module load Core/24.00
 module load ninja
 module list
 export CXX=CC 
