@@ -2,9 +2,10 @@
 #SBATCH -q normal
 #SBATCH -J nanogpt
 #SBATCH --gpu-bind none
-#SBATCH -t 00:05:00
+#SBATCH -t 00:10:00
 #SBATCH -A csc547
 #SBATCH --exclusive
+#SBATCH -C nvme
 # Run like: sbatch run_frontier16.sh
 
 echo "start run: $(date)"
@@ -81,7 +82,7 @@ MASK_7="0x0000fe0000000000" # Cores 41-47
 CPU_MASK="--cpu-bind=mask_cpu:${MASK_0},${MASK_1},${MASK_2},${MASK_3},${MASK_4},${MASK_5},${MASK_6},${MASK_7}"
 
 
-SCRIPT="scripts/get_rank.sh python -u train.py config/train_gpt2_124M.py"
+SCRIPT="scripts/get_rank.sh python -u train.py config/train_gpt2_1.3B.py"
 # log start date
 echo "start nanoGPT: $(date)"
 run_cmd="srun -N $NNODES -n $GPUS --ntasks-per-node=8 -c 7 ${CPU_MASK} --mem-bind=map_mem:3,3,1,1,0,0,2,2 $SCRIPT"

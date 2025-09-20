@@ -50,12 +50,15 @@ def patch_ddp(ddp_model):
     intra_node_pg_size = torch.cuda.device_count()
     
     # build pccl
-    if dist.get_rank() == 0:
-        build()
-        MPI.COMM_WORLD.Barrier()
-    else:
-        MPI.COMM_WORLD.Barrier()
-        build()
+    # if dist.get_rank() == 0:
+    #     build()
+    #     MPI.COMM_WORLD.Barrier()
+    # else:
+    #     MPI.COMM_WORLD.Barrier()
+    #     build()
+    # build PCCL on every node in node-local NVMe
+    build()
+    MPI.COMM_WORLD.Barrier()
     
     # setup process groups sub-communicators
     global pg 
