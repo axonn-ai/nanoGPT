@@ -75,6 +75,7 @@ device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 use_pccl = False
+bucket_cap_mb=None # uses default value from PyTorch DDP
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -213,7 +214,7 @@ if compile:
 
 # wrap model into DDP container
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+    model = DDP(model, device_ids=[ddp_local_rank], bucket_cap_mb=bucket_cap_mb)
     
     # use pccl - register comm hook for pccl allreduce
     if use_pccl:
@@ -274,7 +275,7 @@ if master_process:
     with open(csv_filename, 'w') as f:
         writer = csv.writer(f)
         # Write the header
-        header = ["gpu_count", "slurm_job_id", "model_size", "global_batch_size", "iter", "loss", "time (s)", "mfu", "memory (GB)", "max_mem"]
+        header = ["gpu_count", "slurm_job_id", "model_size", "global_batch_size", "iter", "loss", "time (s)", "memory (GB)", "max_mem (GB)"]
         writer.writerow(header)
         f.flush()
 
@@ -357,7 +358,7 @@ while True:
         # master_process logs to CSV file
         with open(csv_filename, 'a') as f:
             writer = csv.writer(f)
-            writer.writerow([gpu_count, slurm_job_id, iter_num, lossf, dt, memory, peak])
+            writer.writerow([gpu_count, slurm_job_id, f"{n_params/1e9:.2f}B", tokens_per_iter, iter_num, lossf, dt, memory, peak])
             f.flush()
     iter_num += 1
     local_iter_num += 1

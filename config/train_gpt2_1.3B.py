@@ -1,6 +1,6 @@
 # config for training GPT-2 (1.3B)
 
-# these make the total batch size be ~4M
+# these make the total batch size be ~1M
 # 8 batch size * 64 block size * 2048 grad_accum_steps = 1,048,576
 # Using strong scaling, so make grad_acc_steps multiple of maximum gpu count
 batch_size = 8
@@ -23,3 +23,4 @@ learning_rate=2e-4
 max_iters = 10
 
 use_pccl=True
+bucket_cap_mb=32
