@@ -31,6 +31,8 @@ from axonn.intra_layer import clip_grad_norm_, sync_gradients, auto_parallelize
 from axonn.intra_layer import optimize_communication
 
 from model import GPTConfig, GPT
+from patch_ddp import patch_ddp
+import csv
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -75,15 +77,8 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
-
-# model parallelism args
-G_intra_r=1
-G_intra_c=1
-G_intra_d=1
-
-# gradient checkpointing
-gradient_checkpointing=False
-
+use_pccl = False
+bucket_cap_mb=None # uses default value from PyTorch DDP
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -214,6 +209,7 @@ if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
+n_params = model.get_num_params()
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -233,8 +229,12 @@ if compile:
     model = torch.compile(model) # requires PyTorch 2.0
 
 # wrap model into DDP container
-#if ddp:
-#    model = DDP(model, device_ids=[local_rank], process_group=ax.comm_handle.coll_nccl_comm)
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank], bucket_cap_mb=bucket_cap_mb)
+    
+    # use pccl - register comm hook for pccl allreduce
+    if use_pccl:
+        patch_ddp(model)
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -256,7 +256,7 @@ def estimate_loss():
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
-        return learning_rate * it / warmup_iters
+        return learning_rate * (it + 1) / (warmup_iters + 1)
     # 2) if it > lr_decay_iters, return min learning rate
     if it > lr_decay_iters:
         return min_lr
@@ -278,6 +278,22 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model # row model and model are the same in axonn
 running_mfu = -1.0
 
+# Setup benchmark data collection
+data_folder = f"./benchmark/pccl-ddp"
+os.makedirs(data_folder, exist_ok=True)
+
+# Create initial csv file
+gpu_count = ddp_world_size if ddp else 1
+slurm_job_id = os.environ.get('SLURM_JOB_ID', 'unknown')
+all_reduce_library = "pccl" if use_pccl else "xccl"
+csv_filename = os.path.join(data_folder, f"gpt2-{n_params/1e9:.2f}B_{all_reduce_library}_gpus_{gpu_count}_slurm_{slurm_job_id}.csv")
+if master_process:
+    with open(csv_filename, 'w') as f:
+        writer = csv.writer(f)
+        # Write the header
+        header = ["gpu_count", "slurm_job_id", "model_size", "global_batch_size", "iter", "loss", "time (s)", "memory (GB)", "max_mem (GB)"]
+        writer.writerow(header)
+        f.flush()
 
 while True:
 
@@ -351,8 +367,13 @@ while True:
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         memory = torch.cuda.memory_allocated() / 1024 / 1024 / 1024
         peak = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
-        if torch.distributed.get_rank() == 0:
-            print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, mem = {memory:.2f} GB | max mem = {peak} GB")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, mem = {memory:.2f} GB, max mem = {peak:.2f} GB")
+        
+        # master_process logs to CSV file
+        with open(csv_filename, 'a') as f:
+            writer = csv.writer(f)
+            writer.writerow([gpu_count, slurm_job_id, f"{n_params/1e9:.2f}B", tokens_per_iter, iter_num, lossf, dt, memory, peak])
+            f.flush()
     iter_num += 1
     local_iter_num += 1
 
